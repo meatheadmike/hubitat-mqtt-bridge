@@ -37,15 +37,15 @@ preferences {
 	section("Send Notifications?") {
 		input("recipients", "contact", title: "Send notifications to", multiple: true, required: false)
 	}
-
 	section ("Input") {
 		CAPABILITY_MAP.each { key, capability ->
-			input key, capability["capability"], title: capability["name"], multiple: true, required: false
+			if (key != 'hsmStatus' && key != 'hsmSetArm') {
+			  input key, capability["capability"], title: capability["name"], multiple: true, required: false
+			}
 		}
 	}
-
 	section ("Bridge") {
-		input "bridge", "capability.notification", title: "Notify this Bridge", required: false, multiple: true
+		input "bridge", "capability.notification", title: "Notify this Bridge", required: false, multiple: false
 	}
 }
 
@@ -353,6 +353,23 @@ preferences {
 			"button",
 			"numberOfButtons"
 		]
+	],
+	"hsmStatus": [
+		name: "hsmStatus",
+		capability: "capability.hsmStatus",
+		attributes: [
+			"hsmStatus",
+			"hsmRules",
+			"hsmAlert"
+		]
+	],
+	"hsmSetArm": [
+		name: "hsmSetArm",
+		capability: "capability.hsmSetArm",
+		attributes: [
+			"hsmSetArm"
+		],
+		action: "actionAlarmSystemStatus"
 	],
 	"illuminanceMeasurement": [
 		name: "Illuminance Measurement",
@@ -914,7 +931,7 @@ preferences {
 def installed() {
 	log.debug "Installed with settings: ${settings}"
 
-	runEvery15Minutes(initialize)
+	//runEvery15Minutes(initialize)
 	initialize()
 }
 
@@ -935,17 +952,23 @@ def getDeviceNames(devices) {
 		list.push(device.displayName)
 	}
 	list
+	log.debug "getDeviceNames: ${list}"
 }
 
 def initialize() {
 	// subscribe to mode/routine changes
 	subscribe(location, "mode", inputHandler)
 	subscribe(location, "routineExecuted", inputHandler)
-
+	subscribe(location, "hsmStatus", inputHandler)
+    subscribe(location, "hsmRules", inputHandler)
+    subscribe(location, "hsmAlert", inputHandler)
+	subscribe(location, "hsmSetArm", inputHandler)
 	// Subscribe to new events from devices
 	CAPABILITY_MAP.each { key, capability ->
-		capability["attributes"].each { attribute ->
-			subscribe(settings[key], attribute, inputHandler)
+		if (key != 'hsmStatus'&& key != 'hsmSetArm') {
+			capability["attributes"].each { attribute ->
+				subscribe(settings[key], attribute, inputHandler)
+			}
 		}
 	}
 
@@ -968,11 +991,13 @@ def updateSubscription() {
 				attributes[attribute] = []
 			}
 			settings[key].each {device ->
-				attributes[attribute].push(device.displayName)
+				if (key != 'hsmStatus'&& key != 'hsmSetArm') {
+				  attributes[attribute].push(device.displayName)
+				}
 			}
 		}
 	}
-
+	attributes['hsmSetArm'].push('Home')
 	def json = new groovy.json.JsonOutput().toJson([
 		path: "/subscribe",
 		body: [
@@ -1004,13 +1029,16 @@ def bridgeHandler(evt) {
 		actionRoutines(json.value)
 		return
 	}
-
+    
 	// @NOTE this is stored AWFUL, we need a faster lookup table
 	// @NOTE this also has no fast fail, I need to look into how to do that
 	CAPABILITY_MAP.each { key, capability ->
 		if (capability["attributes"].contains(json.type)) {
 			settings[key].each {device ->
-				if (device.displayName == json.name) {
+				if (key == "hsmSetArm") {
+					def action = capability["action"]
+					"$action"(device, json.type, json.value)
+				} else if (device.displayName == json.name) {
 
 					if (json.command == false) {
 						if (device.getSupportedCommands().any {it.name == "setStatus"}) {
@@ -1092,6 +1120,24 @@ def actionAlarm(device, attribute, value) {
 	}
 }
 
+def actionAlarmSystemStatus(device, attribute, value) {
+	log.info "actionAlarmSystemStatus value ${value}"
+	switch(value) {
+			case {it == "ARM_HOME" || it == "armed_home" || it == "stay"}:
+		        sendLocationEvent(name: "hsmSetArm", value: "armHome")
+                break
+			case {it == "ARM_AWAY" || it == "armed_away" || it == "away"}: 
+                sendLocationEvent(name: "hsmSetArm", value: "armAway")
+                break
+			case {it == "ARM_NIGHT" || it == "armed_night" || it == "night"}:
+                sendLocationEvent(name: "hsmSetArm", value: "armNight")
+                break
+			case {it == "DISARM" || it == "disarmed" || it == "off"}:
+                sendLocationEvent(name: "hsmSetArm", value: "disarm")
+                break
+        }
+}
+
 def actionAudioMute(device, attribute, value) {
 	device.setMute(value)
 }
@@ -1131,9 +1177,10 @@ def actionAudioVolume(device, attribute, value) {
 
 def actionColorControl(device, attribute, value) {
 	switch (attribute) {
+		case "color":
 		case "setColor":
 			def values = value.split(',')
-			def colormap = ["hue": values[0] as int, "saturation": values[1] as int]
+			def colormap = ["hue": Math.round(Float.parseFloat(values[0])) as int, "saturation": Math.round(Float.parseFloat(values[1])) as int]
 			device.setColor(colormap)
 			break
 		case "setHue":
@@ -1146,7 +1193,8 @@ def actionColorControl(device, attribute, value) {
 }
 
 def actionColorTemperature(device, attribute, value) {
-	device.setColorTemperature(value as int)
+	def mired_to_kelvin = Math.round(1000000.0/Float.parseFloat(value)) as int
+	device.setColorTemperature(mired_to_kelvin as int)
 }
 
 def actionPresence(device, attribute, value) {
@@ -1216,6 +1264,7 @@ def actionLockOnly(device, attribute, value) {
 }
 
 def actionLock(device, attribute, value) {
+    log.info "actionLock attribute ${attribute}, value ${value}"
 	if (value == "lock") {
 		device.lock()
 	} else if (value == "unlock") {
